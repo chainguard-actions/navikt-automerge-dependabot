@@ -1,0 +1,33 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_EVENT_NAME: pull_request
+      GITHUB_REF: refs/pull/1/merge
+      GITHUB_HEAD_REF: dependabot/npm_and_yarn/lodash-4.17.21
+      GITHUB_BASE_REF: main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          token: GITHUB_TOKEN
+          semver-filter: patch,minor
+          merge-method: merge
+          minimum-age-of-pr: '0'
+          retry-delay-ms: '100'
+          auto-approve: 'false'
+        continue-on-error: true
+      - name: Assert merged-pr-count output exists
+        env:
+          MERGED: ${{ steps.action.outputs.merged-pr-count }}
+        run: |
+          echo "merged-pr-count: $MERGED"
+          if [ -z "$MERGED" ]; then
+            echo "FAIL: merged-pr-count output was empty"
+            exit 1
+          fi
+          echo "PASS: merged-pr-count=$MERGED"
