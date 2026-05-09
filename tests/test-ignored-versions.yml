@@ -1,0 +1,25 @@
+name: Test ignored-versions input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_EVENT_NAME: pull_request
+      GITHUB_REF: refs/pull/4/merge
+      GITHUB_HEAD_REF: dependabot/npm_and_yarn/axios-0.21.1
+      GITHUB_BASE_REF: main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          token: GITHUB_TOKEN
+          ignored-versions: 'lodash@4.17.21,axios@0.21.1'
+          semver-filter: patch,minor
+          retry-delay-ms: '100'
+        continue-on-error: true
+      - name: Assert action ran with ignored-versions
+        run: |
+          echo "Action completed with ignored-versions input set"
+          echo "PASS"

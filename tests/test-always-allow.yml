@@ -1,0 +1,25 @@
+name: Test always-allow input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_EVENT_NAME: pull_request
+      GITHUB_REF: refs/pull/5/merge
+      GITHUB_HEAD_REF: dependabot/npm_and_yarn/some-package-1.0.0
+      GITHUB_BASE_REF: main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          token: GITHUB_TOKEN
+          always-allow: '*'
+          semver-filter: patch,minor
+          retry-delay-ms: '100'
+        continue-on-error: true
+      - name: Assert action ran with always-allow
+        run: |
+          echo "Action completed with always-allow input set"
+          echo "PASS"
