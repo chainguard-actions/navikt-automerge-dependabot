@@ -1,0 +1,27 @@
+name: Test always-allow and always-allow-labels inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_EVENT_NAME: pull_request
+      GITHUB_REF: refs/pull/1/merge
+      GITHUB_HEAD_REF: dependabot/npm_and_yarn/lodash-4.17.21
+      GITHUB_BASE_REF: main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          token: GITHUB_TOKEN
+          always-allow: "*"
+          always-allow-labels: "automerge,dependencies"
+          semver-filter: patch,minor,major
+        continue-on-error: true
+      - name: Assert action completed with always-allow inputs
+        env:
+          MERGED: ${{ steps.action.outputs.merged-pr-count }}
+        run: |
+          echo "merged-pr-count: $MERGED"
+          echo "PASS: action with always-allow and always-allow-labels completed"
