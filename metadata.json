@@ -1,7 +1,7 @@
 {
   "owner": "navikt",
   "name": "automerge-dependabot",
-  "visibility": "internal",
+  "visibility": "public",
   "description": "Automatically merge pull requests created by Dependabot with configurable rules and workflow summary",
   "block_publish": false
 }
