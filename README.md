@@ -8,9 +8,9 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 
 | Version | Tag | Upstream commit |
 |---------|-----|-----------------|
-| v1.2.2 | [`v1.2.2`](https://github.com/chainguard-actions/navikt--automerge-dependabot/tree/v1.2.2) | — |
-| v1.3 | [`v1.3`](https://github.com/chainguard-actions/navikt--automerge-dependabot/tree/v1.3) | — |
-| v1.3.1 | [`v1.3.1`](https://github.com/chainguard-actions/navikt--automerge-dependabot/tree/v1.3.1) | — |
+| v1.2.2 | [`v1.2.2`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.2.2) | — |
+| v1.3 | [`v1.3`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.3) | — |
+| v1.3.1 | [`v1.3.1`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.3.1) | — |
 
 ## Privacy
 
