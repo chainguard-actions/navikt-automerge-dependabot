@@ -1,4 +1,4 @@
-name: Test ignored dependencies
+name: Test semver filter
 on:
   workflow_dispatch:
 jobs:
@@ -12,11 +12,10 @@ jobs:
         continue-on-error: true
         with:
           token: GITHUB_TOKEN
-          ignored-dependencies: lodash,axios,express
-          semver-filter: patch,minor
-          merge-method: squash
+          semver-filter: major,minor,patch
+          merge-method: rebase
 
-      - name: Assert action ran with ignored dependencies config
+      - name: Assert action ran with semver filter including major
         env:
           OUTCOME: ${{ steps.action.outcome }}
           MERGED_COUNT: ${{ steps.action.outputs.merged-pr-count }}

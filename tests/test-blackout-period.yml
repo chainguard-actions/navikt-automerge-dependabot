@@ -1,4 +1,4 @@
-name: Test ignored dependencies
+name: Test blackout period
 on:
   workflow_dispatch:
 jobs:
@@ -12,11 +12,10 @@ jobs:
         continue-on-error: true
         with:
           token: GITHUB_TOKEN
-          ignored-dependencies: lodash,axios,express
+          blackout-periods: Mon,Tue,Wed,Thu,Fri,Sat,Sun
           semver-filter: patch,minor
-          merge-method: squash
 
-      - name: Assert action ran with ignored dependencies config
+      - name: Assert action ran during blackout period
         env:
           OUTCOME: ${{ steps.action.outcome }}
           MERGED_COUNT: ${{ steps.action.outputs.merged-pr-count }}
@@ -24,11 +23,13 @@ jobs:
           echo "outcome: $OUTCOME"
           echo "merged-pr-count: $MERGED_COUNT"
           if [ "$OUTCOME" = "success" ]; then
-            if [ -z "$MERGED_COUNT" ]; then
-              echo "FAIL: action succeeded but merged-pr-count output is empty"
+            echo "PASS: action succeeded during blackout period (merged-pr-count='$MERGED_COUNT')"
+            # During a blackout period covering all days, no PRs should be merged
+            if [ -n "$MERGED_COUNT" ] && [ "$MERGED_COUNT" != "0" ]; then
+              echo "FAIL: expected 0 merged PRs during blackout period, got '$MERGED_COUNT'"
               exit 1
             fi
-            echo "PASS: action succeeded with merged-pr-count='$MERGED_COUNT'"
+            echo "PASS: merged-pr-count is 0 as expected during blackout"
           elif [ "$OUTCOME" = "failure" ]; then
             echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
           else

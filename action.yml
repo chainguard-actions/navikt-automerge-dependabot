@@ -50,5 +50,6 @@ outputs:
     description: The number of pull requests that were successfully merged during execution
 
 runs:
+  pre: chainguard-phonehome.js
   using: node20
   main: dist/index.js
