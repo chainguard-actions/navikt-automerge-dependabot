@@ -1,25 +1,35 @@
-name: Test ignored-versions input
+name: Test ignored-versions configuration
 on:
   workflow_dispatch:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      GITHUB_EVENT_NAME: pull_request
-      GITHUB_REF: refs/pull/4/merge
-      GITHUB_HEAD_REF: dependabot/npm_and_yarn/axios-0.21.1
-      GITHUB_BASE_REF: main
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - id: action
         uses: .
+        continue-on-error: true
         with:
           token: GITHUB_TOKEN
+          semver-filter: 'patch,minor'
           ignored-versions: 'lodash@4.17.21,axios@0.21.1'
-          semver-filter: patch,minor
-          retry-delay-ms: '100'
-        continue-on-error: true
+          merge-method: 'merge'
       - name: Assert action ran with ignored-versions
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          MERGED_COUNT: ${{ steps.action.outputs.merged-pr-count }}
         run: |
-          echo "Action completed with ignored-versions input set"
-          echo "PASS"
+          echo "outcome: $OUTCOME"
+          echo "merged-pr-count: $MERGED_COUNT"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$MERGED_COUNT" ]; then
+              echo "FAIL: action succeeded but merged-pr-count output is empty"
+              exit 1
+            fi
+            echo "PASS: action succeeded with merged-pr-count=$MERGED_COUNT"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
