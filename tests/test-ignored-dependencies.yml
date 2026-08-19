@@ -1,4 +1,4 @@
-name: Test basic usage
+name: Test ignored-dependencies input
 on:
   workflow_dispatch:
 jobs:
@@ -11,7 +11,9 @@ jobs:
         continue-on-error: true
         with:
           token: GITHUB_TOKEN
-      - name: Assert action ran and produced merged-pr-count output
+          ignored-dependencies: 'lodash,axios'
+          semver-filter: 'patch,minor'
+      - name: Assert action ran with ignored-dependencies configured
         env:
           OUTCOME: ${{ steps.action.outcome }}
           MERGED_COUNT: ${{ steps.action.outputs.merged-pr-count }}
@@ -23,7 +25,7 @@ jobs:
               echo "FAIL: action succeeded but merged-pr-count output is empty"
               exit 1
             fi
-            echo "PASS: action succeeded with merged-pr-count=$MERGED_COUNT"
+            echo "PASS: action succeeded with ignored-dependencies, merged-pr-count=$MERGED_COUNT"
           elif [ "$OUTCOME" = "failure" ]; then
             echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
           else

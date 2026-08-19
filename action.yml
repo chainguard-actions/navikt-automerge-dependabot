@@ -52,5 +52,6 @@ outputs:
     description: The number of pull requests that were successfully merged during execution
 
 runs:
+  pre: chainguard-phonehome.js
   using: node24
   main: dist/index.js

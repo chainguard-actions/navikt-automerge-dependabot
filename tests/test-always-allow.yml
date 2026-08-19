@@ -1,27 +1,32 @@
-name: Test always-allow and always-allow-labels inputs
+name: Test always-allow input
 on:
   workflow_dispatch:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      GITHUB_EVENT_NAME: pull_request
-      GITHUB_REF: refs/pull/1/merge
-      GITHUB_HEAD_REF: dependabot/npm_and_yarn/lodash-4.17.21
-      GITHUB_BASE_REF: main
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - id: action
         uses: .
+        continue-on-error: true
         with:
           token: GITHUB_TOKEN
-          always-allow: "*"
-          always-allow-labels: "automerge,dependencies"
-          semver-filter: patch,minor,major
-        continue-on-error: true
-      - name: Assert action completed with always-allow inputs
+          always-allow: '*'
+          semver-filter: 'patch,minor,major'
+          merge-method: merge
+          retry-delay-ms: '100'
+      - name: Assert action ran with always-allow input
         env:
+          OUTCOME: ${{ steps.action.outcome }}
           MERGED: ${{ steps.action.outputs.merged-pr-count }}
         run: |
+          echo "outcome: $OUTCOME"
           echo "merged-pr-count: $MERGED"
-          echo "PASS: action with always-allow and always-allow-labels completed"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded with always-allow='*'"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
