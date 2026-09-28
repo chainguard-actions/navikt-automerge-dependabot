@@ -1,0 +1,1438 @@
+import { jest, describe, beforeEach, afterEach, test, expect } from '@jest/globals';
+import * as core from '../__fixtures__/core.js';
+
+jest.unstable_mockModule('@actions/core', () => core);
+
+const { findMergeablePRs, extractMultipleDependencyInfo, checkPRMergeability, approvePullRequest, updatePRBranch, waitForChecksAfterUpdate, evaluateChecks } = await import('../src/pullRequests.js');
+const { setupTestEnvironment, createMockPR } = await import('./helpers/mockSetup.js');
+
+describe('PullRequests Module', () => {
+  let originalDate;
+  let mockOctokit;
+  
+  beforeEach(() => {
+    jest.clearAllMocks();
+    
+    // Store the original Date
+    originalDate = global.Date;
+    
+    // Set up basic test environment
+    const result = setupTestEnvironment(core, null, { mockResponses: false });
+    mockOctokit = result.mockOctokit;
+  });
+  
+  afterEach(() => {
+    // Restore original Date
+    global.Date = originalDate;
+  });
+  
+  test('should filter PRs based on criteria', async () => {
+    // Set up mock responses
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        }),
+        createMockPR({
+          number: 2,
+          title: 'Some other PR',
+          user: { login: 'user1' },
+          head: { ref: 'feature/something', sha: 'def456' },
+          created_at: '2025-05-12T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { state: 'success' } });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({ data: { check_runs: [] } });
+    
+    // Mock current date to ensure deterministic age comparisons
+    const mockDate = new Date('2025-05-12T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 1);
+    
+    expect(result.eligiblePRs.length).toBe(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+    expect(result.eligiblePRs[0].dependencyInfo.name).toBe('lodash');
+  });
+  
+  test('should filter out PRs that are not from Dependabot', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          user: { login: 'user1' }, // Not dependabot
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+  
+  test('should filter out PRs with non-Dependabot commits', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [
+        { sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } },
+        { sha: 'def456abc789', author: { login: 'malicious-user' }, committer: { login: 'malicious-user' } }
+      ]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { state: 'success' } });
+    
+    // Use a date that ensures PRs are old enough
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+    expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('contains commits from authors other than Dependabot'));
+  });
+  
+  test('should filter out PRs with missing commit author information', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456' }] // Missing author and committer information
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { state: 'success' } });
+    
+    // Use a date that ensures PRs are old enough
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+    expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('contains commits from authors other than Dependabot'));
+  });
+  
+  test('should filter out PRs that are too recent', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-11T10:00:00Z' // Just 1 day old, but test requires 2
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { state: 'success' } });
+    
+    // Set a current date that makes the PR too recent (only 1 day old)
+    const mockDate = new Date('2025-05-12T10:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 2);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+  
+  test('should filter out PRs that are not mergeable', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: false } // Not mergeable
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { state: 'success' } });
+    
+    // Use a date that ensures PRs are old enough
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+
+  test('should handle null mergeable state with retry logic', async () => {
+    // Set up mock responses
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    // Mock pulls.get to return null on first call, then true on second call
+    mockOctokit.rest.pulls.get
+      .mockResolvedValueOnce({ data: { number: 1, mergeable: null } })
+      .mockResolvedValueOnce({ data: { number: 1, mergeable: true } });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success' }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({ data: { check_runs: [] } });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({
+      data: []
+    });
+
+    // Mock current date to be after the minimum age
+    const mockDate = new Date('2025-05-15T10:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 3, 20);
+
+    expect(result.eligiblePRs).toHaveLength(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+    
+    // Verify that pulls.get was called twice due to retry logic
+    expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+    expect(core.debug).toHaveBeenCalledWith('PR #1 mergeable state determined: true (attempt 2)');
+  });
+
+  test('should fail after max retries when mergeable state remains null', async () => {
+    // Set up mock responses
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    // Mock pulls.get to always return null
+    mockOctokit.rest.pulls.get.mockResolvedValue({ data: { number: 1, mergeable: null } });
+
+    // Mock current date to be after the minimum age
+    const mockDate = new Date('2025-05-15T10:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 3, 10);
+
+    expect(result.eligiblePRs).toHaveLength(0);
+    
+    // Verify that pulls.get was called 3 times (max retries)
+    expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(3);
+    expect(core.warning).toHaveBeenCalledWith('PR #1 mergeable state is still null after 3 attempts');
+  });
+
+  test('should handle API errors during mergeable state check', async () => {
+    // Set up mock responses
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    // Mock pulls.get to throw error on first call, then succeed on second call
+    mockOctokit.rest.pulls.get
+      .mockRejectedValueOnce(new Error('API rate limit exceeded'))
+      .mockResolvedValueOnce({ data: { number: 1, mergeable: true } });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success' }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({ data: { check_runs: [] } });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({
+      data: []
+    });
+
+    // Mock current date to be after the minimum age
+    const mockDate = new Date('2025-05-15T10:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 3, 20);
+
+    expect(result.eligiblePRs).toHaveLength(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+    
+    // Verify that pulls.get was called twice due to retry after error
+    expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+    expect(core.warning).toHaveBeenCalledWith('Error checking PR #1 mergeability (attempt 1): API rate limit exceeded');
+  });
+  
+  test('should filter out PRs with failing status checks', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'failure', total_count: 1 } // Failing legacy status
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({ data: { check_runs: [] } });
+    
+    // Use a date that ensures PRs are old enough
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+  
+  test('should filter out PRs with failing check runs (Checks API)', async () => {
+    // Regression test: the Status API (getCombinedStatusForRef) only covers legacy
+    // commit statuses. GitHub Actions check runs are reported via the Checks API
+    // (checks.listForRef). A PR whose Status API state is 'success' but has a
+    // failing check run must NOT be merged.
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+
+    // Status API reports success (no legacy statuses), but a GitHub Actions
+    // check run has failed — this is the scenario that was previously missed.
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success', total_count: 0 }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({
+      data: {
+        check_runs: [
+          { status: 'completed', conclusion: 'failure', name: 'ci / test' }
+        ]
+      }
+    });
+
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+
+  test.each([
+    ['failure'],
+    ['cancelled'],
+    ['timed_out'],
+    ['action_required'],
+    ['stale'],
+  ])('should filter out PRs when a check run has conclusion "%s"', async (conclusion) => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success', total_count: 0 }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({
+      data: {
+        check_runs: [{ status: 'completed', conclusion, name: 'ci / test' }]
+      }
+    });
+
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+
+  test('should allow PRs where all check runs have passed', async () => {
+    // Verify the fix does not block PRs when checks are genuinely passing
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success', total_count: 0 }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({
+      data: {
+        check_runs: [
+          { status: 'completed', conclusion: 'success', name: 'ci / test' },
+          { status: 'completed', conclusion: 'success', name: 'ci / lint' }
+        ]
+      }
+    });
+
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+
+    expect(result.eligiblePRs.length).toBe(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+  });
+
+  test('should filter out PRs with pending check runs', async () => {
+    // A PR with in-progress checks must not be merged — the outcome is unknown.
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'pending', total_count: 0 }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({
+      data: {
+        check_runs: [
+          { status: 'in_progress', conclusion: null, name: 'ci / test' }
+        ]
+      }
+    });
+
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+
+  test('should filter out PRs with pending legacy status checks (total_count > 0)', async () => {
+    // When the Status API returns "pending" with total_count > 0, a legacy status
+    // context is still running — we must not merge. total_count === 0 means no
+    // legacy statuses exist (GitHub Actions only), which is safe to proceed.
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    // "pending" with total_count > 0 = a legacy status context is still running
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'pending', total_count: 1 }
+    });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({ data: { check_runs: [] } });
+
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+
+  test('should filter out PRs with blocking reviews', async () => {
+    mockOctokit.rest.pulls.list.mockResolvedValue({
+      data: [
+        createMockPR({
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+          head: { ref: 'dependabot/npm_and_yarn/lodash-4.17.21', sha: 'abc123' },
+          created_at: '2025-05-10T10:00:00Z'
+        })
+      ]
+    });
+
+    mockOctokit.rest.pulls.get.mockResolvedValue({
+      data: { number: 1, mergeable: true }
+    });
+
+    mockOctokit.rest.pulls.listCommits.mockResolvedValue({
+      data: [{ sha: 'abc123def456', author: { login: 'dependabot[bot]' }, committer: { login: 'dependabot[bot]' } }]
+    });
+
+    mockOctokit.rest.pulls.listReviews.mockResolvedValue({
+      data: [
+        {
+          user: { id: 123 },
+          state: 'REQUEST_CHANGES',
+          submitted_at: '2025-05-11T00:00:00Z'
+        }
+      ]
+    });
+
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({ data: { state: 'success' } });
+    mockOctokit.rest.checks.listForRef.mockResolvedValue({ data: { check_runs: [] } });
+    
+    // Use a date that ensures PRs are old enough
+    const mockDate = new Date('2025-05-15T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 0);
+    
+    expect(result.eligiblePRs.length).toBe(0);
+  });
+
+  test('should handle PRs with multiple dependency updates', async () => {
+    // Mock GitHub API client and responses
+    const mockOctokit = {
+      rest: {
+        pulls: {
+          list: jest.fn().mockResolvedValue({
+            data: [
+              {
+                number: 1,
+                title: 'Bump dependency-A and dependency-B in /my-group',
+                body: `Bumps [dependency-A](https://github.com/org/dependency-A) and [dependency-B](https://github.com/org/dependency-B).
+      
+Updates dependency-A from 1.2.3 to 1.3.0
+- [Release notes](https://github.com/org/dependency-A/releases)
+      
+Updates dependency-B from 2.1.0 to 3.0.0
+- [Release notes](https://github.com/org/dependency-B/releases)`,
+                user: { login: 'dependabot[bot]' },
+                head: { ref: 'dependabot/npm_and_yarn/my-group/dependency-A-dependency-B', sha: 'abc123' },
+                created_at: '2025-05-10T10:00:00Z'
+              }
+            ]
+          }),
+          get: jest.fn().mockResolvedValue({
+            data: {
+              number: 1,
+              mergeable: true
+            }
+          }),
+          listCommits: jest.fn().mockResolvedValue({
+            data: [
+              {
+                sha: 'abc123def456',
+                author: { login: 'dependabot[bot]' },
+                committer: { login: 'dependabot[bot]' }
+              }
+            ]
+          }),
+          listReviews: jest.fn().mockResolvedValue({
+            data: []
+          })
+        },
+        repos: {
+          getCombinedStatusForRef: jest.fn().mockResolvedValue({
+            data: { state: 'success' }
+          })
+        },
+        checks: {
+          listForRef: jest.fn().mockResolvedValue({ data: { check_runs: [] } })
+        }
+      }
+    };
+    
+    // Mock current date to ensure deterministic age comparisons
+    const mockDate = new Date('2025-05-12T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 1);
+    
+    expect(result.eligiblePRs.length).toBe(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+    expect(result.eligiblePRs[0].dependencyInfoList).toBeDefined();
+    expect(result.eligiblePRs[0].dependencyInfoList.length).toBe(2);
+    expect(result.eligiblePRs[0].dependencyInfoList[0].name).toBe('dependency-A');
+    expect(result.eligiblePRs[0].dependencyInfoList[0].semverChange).toBe('minor');
+    expect(result.eligiblePRs[0].dependencyInfoList[1].name).toBe('dependency-B');
+    expect(result.eligiblePRs[0].dependencyInfoList[1].semverChange).toBe('major');
+  });
+
+  test('should handle PRs with dependency group updates', async () => {
+    // Mock GitHub API client and responses
+    const mockOctokit = {
+      rest: {
+        pulls: {
+          list: jest.fn().mockResolvedValue({
+            data: [
+              {
+                number: 1,
+                title: 'Bump the maven group across / with 6 updates',
+                body: `Bumps the maven group with 6 updates in the / directory:
+
+| Package | From | To |
+| --- | --- | --- |
+| org.flywaydb:flyway-database-postgresql | \`11.8.0\` | \`11.8.2\` |
+| [org.verapdf:validation-model](https://github.com/veraPDF/veraPDF-validation) | \`1.26.5\` | \`1.28.1\` |
+| [org.jetbrains.kotlin:kotlin-stdlib-jdk8](https://github.com/JetBrains/kotlin) | \`2.1.20\` | \`2.1.21\` |
+| [org.jetbrains.kotlin:kotlin-test](https://github.com/JetBrains/kotlin) | \`2.1.20\` | \`2.1.21\` |
+| org.jetbrains.kotlin:kotlin-maven-allopen | \`2.1.20\` | \`2.1.21\` |
+| org.jetbrains.kotlin:kotlin-maven-plugin | \`2.1.20\` | \`2.1.21\` |`,
+                user: { login: 'dependabot[bot]' },
+                head: { ref: 'dependabot/maven/maven-group', sha: 'abc123' },
+                created_at: '2025-05-10T10:00:00Z'
+              }
+            ]
+          }),
+          get: jest.fn().mockResolvedValue({
+            data: {
+              number: 1,
+              mergeable: true
+            }
+          }),
+          listCommits: jest.fn().mockResolvedValue({
+            data: [
+              {
+                sha: 'abc123def456',
+                author: { login: 'dependabot[bot]' },
+                committer: { login: 'dependabot[bot]' }
+              }
+            ]
+          }),
+          listReviews: jest.fn().mockResolvedValue({
+            data: []
+          })
+        },
+        repos: {
+          getCombinedStatusForRef: jest.fn().mockResolvedValue({
+            data: { state: 'success' }
+          })
+        },
+        checks: {
+          listForRef: jest.fn().mockResolvedValue({ data: { check_runs: [] } })
+        }
+      }
+    };
+    
+    // Mock current date to ensure deterministic age comparisons
+    const mockDate = new Date('2025-05-12T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+    
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 1);
+    
+    expect(result.eligiblePRs.length).toBe(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+    expect(result.eligiblePRs[0].dependencyInfoList).toBeDefined();
+    expect(result.eligiblePRs[0].dependencyInfoList.length).toBe(6);
+    expect(result.eligiblePRs[0].dependencyInfoList[0].name).toBe('org.flywaydb:flyway-database-postgresql');
+    expect(result.eligiblePRs[0].dependencyInfoList[0].semverChange).toBe('patch');
+    expect(result.eligiblePRs[0].dependencyInfoList[1].name).toBe('org.verapdf:validation-model');
+    expect(result.eligiblePRs[0].dependencyInfoList[1].semverChange).toBe('minor');
+  });
+
+  test('should handle PRs with "convential commit"-style titles', async () => {
+    // Mock GitHub API client and responses
+    const mockOctokit = {
+      rest: {
+        pulls: {
+          list: jest.fn().mockResolvedValue({
+            data: [
+              {
+                number: 1,
+                title: 'build(deps): bump the all-minor-updates group with 2 updates',
+                body: `Bumps the all-minor-updates group with 2 updates:
+
+| Package | From | To |
+| --- | --- | --- |
+| [dependency-A](https://github.com/org/dependency-A) | \`1.2.3\` | \`1.3.0\` |
+| [dependency-B](https://github.com/org/dependency-B) | \`2.1.0\` | \`2.1.1\` |
+
+Updates dependency-A from 1.2.3 to 1.3.0
+- [Release notes](https://github.com/org/dependency-A/releases)
+
+Updates dependency-B from 2.1.0 to 2.1.1
+- [Release notes](https://github.com/org/dependency-B/releases)`,
+                user: { login: 'dependabot[bot]' },
+                head: { ref: 'dependabot/maven/maven-group', sha: 'abc123' },
+                created_at: '2025-05-10T10:00:00Z'
+              }
+            ]
+          }),
+          get: jest.fn().mockResolvedValue({
+            data: {
+              number: 1,
+              mergeable: true
+            }
+          }),
+          listCommits: jest.fn().mockResolvedValue({
+            data: [
+              {
+                sha: 'abc123def456',
+                author: { login: 'dependabot[bot]' },
+                committer: { login: 'dependabot[bot]' }
+              }
+            ]
+          }),
+          listReviews: jest.fn().mockResolvedValue({
+            data: []
+          })
+        },
+        repos: {
+          getCombinedStatusForRef: jest.fn().mockResolvedValue({
+            data: { state: 'success' }
+          })
+        },
+        checks: {
+          listForRef: jest.fn().mockResolvedValue({ data: { check_runs: [] } })
+        }
+      }
+    };
+
+    // Mock current date to ensure deterministic age comparisons
+    const mockDate = new Date('2025-05-12T00:00:00Z');
+    global.Date = class extends Date {
+      constructor(...args) {
+        if (args.length === 0) {
+          return mockDate;
+        }
+        return new originalDate(...args);
+      }
+    };
+
+    const result = await findMergeablePRs(mockOctokit, 'owner', 'repo', 1);
+
+    expect(result.eligiblePRs.length).toBe(1);
+    expect(result.eligiblePRs[0].number).toBe(1);
+    expect(result.eligiblePRs[0].dependencyInfoList).toBeDefined();
+    expect(result.eligiblePRs[0].dependencyInfoList.length).toBe(2);
+    expect(result.eligiblePRs[0].dependencyInfoList[0].name).toBe('dependency-A');
+    expect(result.eligiblePRs[0].dependencyInfoList[0].semverChange).toBe('minor');
+    expect(result.eligiblePRs[0].dependencyInfoList[1].name).toBe('dependency-B');
+    expect(result.eligiblePRs[0].dependencyInfoList[1].semverChange).toBe('patch');
+  });
+
+  describe('extractMultipleDependencyInfo', () => {
+    test('should extract information from "Bump A and B in directory" format', () => {
+      const title = 'Bump dependency-A and dependency-B in /my-group';
+      const body = `Bumps [dependency-A](https://github.com/org/dependency-A) and [dependency-B](https://github.com/org/dependency-B).
+      
+Updates dependency-A from 1.2.3 to 1.3.0
+- [Release notes](https://github.com/org/dependency-A/releases)
+      
+Updates dependency-B from 2.1.0 to 3.0.0
+- [Release notes](https://github.com/org/dependency-B/releases)`;
+
+      const result = extractMultipleDependencyInfo(title, body);
+      expect(result.length).toBe(2);
+      
+      expect(result[0].name).toBe('dependency-A');
+      expect(result[0].fromVersion).toBe('1.2.3');
+      expect(result[0].toVersion).toBe('1.3.0');
+      expect(result[0].semverChange).toBe('minor');
+      
+      expect(result[1].name).toBe('dependency-B');
+      expect(result[1].fromVersion).toBe('2.1.0');
+      expect(result[1].toVersion).toBe('3.0.0');
+      expect(result[1].semverChange).toBe('major');
+    });
+
+    test('should extract information from "build(deps): bump the X group with 2 updates" format', () => {
+      const title = 'build(deps): bump the all-minor-updates with 2 updates';
+      const body = `Bumps the all-minor-updates group with 2 updates:
+      
+Updates dependency-A from 1.2.3 to 1.3.0
+- [Release notes](https://github.com/org/dependency-A/releases)
+      
+Updates dependency-B from 2.1.0 to 2.1.1
+- [Release notes](https://github.com/org/dependency-B/releases)`;
+
+      const result = extractMultipleDependencyInfo(title, body);
+      expect(result.length).toBe(2);
+
+      expect(result[0].name).toBe('dependency-A');
+      expect(result[0].fromVersion).toBe('1.2.3');
+      expect(result[0].toVersion).toBe('1.3.0');
+      expect(result[0].semverChange).toBe('minor');
+
+      expect(result[1].name).toBe('dependency-B');
+      expect(result[1].fromVersion).toBe('2.1.0');
+      expect(result[1].toVersion).toBe('2.1.1');
+      expect(result[1].semverChange).toBe('patch');
+    });
+
+    test('should extract information from table format', () => {
+      const title = 'Bump the maven group across / with 6 updates';
+      const body = `Bumps the maven group with 6 updates in the / directory:
+
+| Package | From | To |
+| --- | --- | --- |
+| org.flywaydb:flyway-database-postgresql | \`11.8.0\` | \`11.8.2\` |
+| [org.verapdf:validation-model](https://github.com/veraPDF/veraPDF-validation) | \`1.26.5\` | \`1.28.1\` |
+| [org.jetbrains.kotlin:kotlin-stdlib-jdk8](https://github.com/JetBrains/kotlin) | \`2.1.20\` | \`2.1.21\` |
+| [org.jetbrains.kotlin:kotlin-test](https://github.com/JetBrains/kotlin) | \`2.1.20\` | \`2.1.21\` |
+| org.jetbrains.kotlin:kotlin-maven-allopen | \`2.1.20\` | \`2.1.21\` |
+| org.jetbrains.kotlin:kotlin-maven-plugin | \`2.1.20\` | \`2.1.21\` |`;
+
+      const result = extractMultipleDependencyInfo(title, body);
+      expect(result.length).toBe(6);
+      
+      expect(result[0].name).toBe('org.flywaydb:flyway-database-postgresql');
+      expect(result[0].fromVersion).toBe('11.8.0');
+      expect(result[0].toVersion).toBe('11.8.2');
+      expect(result[0].semverChange).toBe('patch');
+      
+      expect(result[1].name).toBe('org.verapdf:validation-model');
+      expect(result[1].fromVersion).toBe('1.26.5');
+      expect(result[1].toVersion).toBe('1.28.1');
+      expect(result[1].semverChange).toBe('minor');
+      
+      // Check the package with markdown links
+      expect(result[2].name).toBe('org.jetbrains.kotlin:kotlin-stdlib-jdk8');
+      
+      // Check the last package
+      expect(result[5].name).toBe('org.jetbrains.kotlin:kotlin-maven-plugin');
+      expect(result[5].fromVersion).toBe('2.1.20');
+      expect(result[5].toVersion).toBe('2.1.21');
+      expect(result[5].semverChange).toBe('patch');
+    });
+
+    test('should return empty array for non-matching title', () => {
+      const title = 'This is not a Dependabot PR title';
+      const body = 'This is not a Dependabot PR body';
+      
+      const result = extractMultipleDependencyInfo(title, body);
+      expect(result).toEqual([]);
+    });
+    
+    test('should handle case where body does not contain expected information', () => {
+      const title = 'Bump dependency-A and dependency-B in /my-group';
+      const body = 'This body does not contain the expected dependency information';
+      
+      const result = extractMultipleDependencyInfo(title, body);
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('checkPRMergeability', () => {
+    test('should retry when mergeable is initially null and then becomes true', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            get: jest.fn()
+              .mockResolvedValueOnce({
+                data: { number: 1, mergeable: null, mergeable_state: 'unknown' }
+              })
+              .mockResolvedValueOnce({
+                data: { number: 1, mergeable: true, mergeable_state: 'clean' }
+              })
+          }
+        }
+      };
+
+      const result = await checkPRMergeability(mockOctokit, 'owner', 'repo', 1, 10); // Fast delay for tests
+      
+      expect(result).toEqual({ number: 1, mergeable: true, mergeable_state: 'clean' });
+      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+    });
+
+    test('should return null after max retries when mergeable stays null', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            get: jest.fn().mockResolvedValue({
+              data: { number: 1, mergeable: null, mergeable_state: 'unknown' }
+            })
+          }
+        }
+      };
+
+      const result = await checkPRMergeability(mockOctokit, 'owner', 'repo', 1, 10); // Fast delay for tests
+      
+      expect(result).toBeNull();
+      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(3); // Initial + 2 retries
+    });
+
+    test('should handle API errors during retry', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            get: jest.fn()
+              .mockResolvedValueOnce({
+                data: { number: 1, mergeable: null, mergeable_state: 'unknown' }
+              })
+              .mockRejectedValueOnce(new Error('API Error'))
+              .mockRejectedValueOnce(new Error('API Error'))
+          }
+        }
+      };
+
+      const result = await checkPRMergeability(mockOctokit, 'owner', 'repo', 1, 10); // Fast delay for tests
+      
+      expect(result).toBeNull();
+      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(3); // Initial + 2 retries
+    });
+  });
+
+  describe('approvePullRequest', () => {
+    test('should successfully approve a pull request', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            createReview: jest.fn().mockResolvedValue({})
+          }
+        }
+      };
+
+      const result = await approvePullRequest(mockOctokit, 'owner', 'repo', 123);
+
+      expect(result).toBe(true);
+      expect(mockOctokit.rest.pulls.createReview).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 123,
+        event: 'APPROVE'
+      });
+      expect(core.info).toHaveBeenCalledWith('Approved PR #123');
+    });
+
+    test('should handle approval failure', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            createReview: jest.fn().mockRejectedValue(new Error('Insufficient permissions'))
+          }
+        }
+      };
+
+      const result = await approvePullRequest(mockOctokit, 'owner', 'repo', 456);
+
+      expect(result).toBe(false);
+      expect(mockOctokit.rest.pulls.createReview).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 456,
+        event: 'APPROVE'
+      });
+      expect(core.warning).toHaveBeenCalledWith('Failed to approve PR #456: Insufficient permissions');
+    });
+
+    test('should handle network errors during approval', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            createReview: jest.fn().mockRejectedValue(new Error('Network timeout'))
+          }
+        }
+      };
+
+      const result = await approvePullRequest(mockOctokit, 'owner', 'repo', 789);
+
+      expect(result).toBe(false);
+      expect(core.warning).toHaveBeenCalledWith('Failed to approve PR #789: Network timeout');
+    });
+  });
+
+  describe('updatePRBranch', () => {
+
+    test('should successfully update a PR branch', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            updateBranch: jest.fn().mockResolvedValue({})
+          }
+        }
+      };
+
+      const result = await updatePRBranch(mockOctokit, 'owner', 'repo', 123);
+
+      expect(result).toBe(true);
+      expect(mockOctokit.rest.pulls.updateBranch).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 123
+      });
+      expect(core.info).toHaveBeenCalledWith('Updated branch for PR #123 to sync with base branch');
+    });
+
+    test('should handle update failure', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            updateBranch: jest.fn().mockRejectedValue(new Error('Branch has conflicts'))
+          }
+        }
+      };
+
+      const result = await updatePRBranch(mockOctokit, 'owner', 'repo', 456);
+
+      expect(result).toBe(false);
+      expect(mockOctokit.rest.pulls.updateBranch).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 456
+      });
+      expect(core.warning).toHaveBeenCalledWith('Failed to update branch for PR #456: Branch has conflicts');
+    });
+  });
+
+  describe('waitForChecksAfterUpdate', () => {
+
+    const noCheckRuns = { data: { check_runs: [] } };
+    const prMergeable = { data: { number: 1, mergeable: true, mergeable_state: 'clean', head: { sha: 'abc123' } } };
+
+    test('should return true when checks pass immediately', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'success' } }) },
+          checks: { listForRef: jest.fn().mockResolvedValue(noCheckRuns) }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(true);
+      expect(core.info).toHaveBeenCalledWith(expect.stringContaining('Checks passed for PR #1'));
+    });
+
+    test('should return false when status checks fail', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'failure' } }) },
+          checks: { listForRef: jest.fn().mockResolvedValue(noCheckRuns) }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(false);
+      expect(core.warning).toHaveBeenCalledWith('Checks failed for PR #1 after branch update');
+    });
+
+    test('should return false when a check run fails', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'success', total_count: 0 } }) },
+          checks: {
+            listForRef: jest.fn().mockResolvedValue({
+              data: { check_runs: [{ status: 'completed', conclusion: 'failure' }] }
+            })
+          }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(false);
+      expect(core.warning).toHaveBeenCalledWith('Checks failed for PR #1 after branch update');
+    });
+
+    test.each([
+      ['cancelled'],
+      ['timed_out'],
+      ['action_required'],
+      ['stale'],
+    ])('should return false when a check run has conclusion "%s"', async (conclusion) => {
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'success', total_count: 0 } }) },
+          checks: {
+            listForRef: jest.fn().mockResolvedValue({
+              data: { check_runs: [{ status: 'completed', conclusion }] }
+            })
+          }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(false);
+      expect(core.warning).toHaveBeenCalledWith('Checks failed for PR #1 after branch update');
+    });
+
+    test('should return false when PR becomes unmergeable', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: {
+            get: jest.fn().mockResolvedValue({
+              data: { number: 1, mergeable: false, mergeable_state: 'dirty', head: { sha: 'abc123' } }
+            })
+          },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'pending' } }) },
+          checks: { listForRef: jest.fn().mockResolvedValue(noCheckRuns) }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(false);
+      expect(core.warning).toHaveBeenCalledWith('PR #1 is not mergeable after branch update (may have conflicts)');
+    });
+
+    test('should timeout if checks take too long', async () => {
+      jest.useFakeTimers();
+
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'pending' } }) },
+          checks: { listForRef: jest.fn().mockResolvedValue(noCheckRuns) }
+        }
+      };
+
+      // maxWaitSeconds=1, retryDelayMs=100 – advance fake clock past the 1s timeout
+      const resultPromise = waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 1, 100);
+      await jest.advanceTimersByTimeAsync(2000);
+      const result = await resultPromise;
+
+      jest.useRealTimers();
+
+      expect(result).toBe(false);
+      expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('Timeout waiting for checks'));
+    });
+
+    test('should handle pending checks and eventually succeed', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: {
+            getCombinedStatusForRef: jest.fn()
+              .mockResolvedValueOnce({ data: { state: 'pending' } })
+              .mockResolvedValueOnce({ data: { state: 'pending' } })
+              .mockResolvedValueOnce({ data: { state: 'success' } })
+          },
+          checks: { listForRef: jest.fn().mockResolvedValue(noCheckRuns) }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(true);
+      expect(mockOctokit.rest.repos.getCombinedStatusForRef).toHaveBeenCalledTimes(3);
+    });
+
+    test('should wait for in-progress check runs to complete before succeeding', async () => {
+      const mockOctokit = {
+        rest: {
+          pulls: { get: jest.fn().mockResolvedValue(prMergeable) },
+          repos: { getCombinedStatusForRef: jest.fn().mockResolvedValue({ data: { state: 'success', total_count: 0 } }) },
+          checks: {
+            listForRef: jest.fn()
+              .mockResolvedValueOnce({ data: { check_runs: [{ status: 'in_progress', conclusion: null }] } })
+              .mockResolvedValueOnce({ data: { check_runs: [{ status: 'completed', conclusion: 'success' }] } })
+          }
+        }
+      };
+
+      const result = await waitForChecksAfterUpdate(mockOctokit, 'owner', 'repo', 1, 60, 10);
+
+      expect(result).toBe(true);
+      expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+describe('evaluateChecks', () => {
+  const noCheckRuns = [];
+  const passing = { state: 'success', total_count: 1 };
+  const noLegacy = { state: 'pending', total_count: 0 };
+
+  test('returns failed=false, pending=false when all checks pass', () => {
+    const checkRuns = [{ status: 'completed', conclusion: 'success' }];
+    expect(evaluateChecks(passing, checkRuns)).toEqual({ failed: false, pending: false });
+  });
+
+  test('returns failed=false, pending=false when there are no checks at all', () => {
+    expect(evaluateChecks(noLegacy, noCheckRuns)).toEqual({ failed: false, pending: false });
+  });
+
+  test('returns failed=true when Status API reports failure', () => {
+    expect(evaluateChecks({ state: 'failure', total_count: 1 }, noCheckRuns)).toEqual({ failed: true, pending: false });
+  });
+
+  test.each(['failure', 'cancelled', 'timed_out', 'action_required', 'stale'])(
+    'returns failed=true when a check run has conclusion "%s"',
+    (conclusion) => {
+      const checkRuns = [{ status: 'completed', conclusion }];
+      expect(evaluateChecks(noLegacy, checkRuns)).toEqual({ failed: true, pending: false });
+    }
+  );
+
+  test('returns pending=true when Status API is pending with total_count > 0', () => {
+    expect(evaluateChecks({ state: 'pending', total_count: 1 }, noCheckRuns)).toEqual({ failed: false, pending: true });
+  });
+
+  test('does NOT treat pending with total_count === 0 as pending (no legacy statuses)', () => {
+    expect(evaluateChecks({ state: 'pending', total_count: 0 }, noCheckRuns)).toEqual({ failed: false, pending: false });
+  });
+
+  test.each(['queued', 'in_progress'])(
+    'returns pending=true when a check run has status "%s"',
+    (status) => {
+      const checkRuns = [{ status, conclusion: null }];
+      expect(evaluateChecks(noLegacy, checkRuns)).toEqual({ failed: false, pending: true });
+    }
+  );
+
+  test('failed takes precedence over pending', () => {
+    const checkRuns = [
+      { status: 'completed', conclusion: 'failure' },
+      { status: 'in_progress', conclusion: null }
+    ];
+    expect(evaluateChecks(noLegacy, checkRuns)).toEqual({ failed: true, pending: true });
+  });
+
+  test('neutral and skipped conclusions are not treated as failures', () => {
+    const checkRuns = [
+      { status: 'completed', conclusion: 'neutral' },
+      { status: 'completed', conclusion: 'skipped' }
+    ];
+    expect(evaluateChecks(passing, checkRuns)).toEqual({ failed: false, pending: false });
+  });
+});
