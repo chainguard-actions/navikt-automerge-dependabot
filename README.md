@@ -12,6 +12,7 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 | v1.3 | [`v1.3`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.3) | [`79855c4`](https://github.com/navikt/automerge-dependabot/commit/79855c4c7708986517c58105217f27bc39e215d0) |
 | v1.3.1 | [`v1.3.1`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.3.1) | [`759b22c`](https://github.com/navikt/automerge-dependabot/commit/759b22cb72dd3a704f3e1f5ced2d395e43315ab3) |
 | v1.5.1 | [`v1.5.1`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.5.1) | [`0e342d2`](https://github.com/navikt/automerge-dependabot/commit/0e342d25820ca0d2941dcdcad4b7bbb59ad59122) |
+| v1.6.0 | [`v1.6.0`](https://github.com/chainguard-actions/navikt-automerge-dependabot/tree/v1.6.0) | [`09f5db3`](https://github.com/navikt/automerge-dependabot/commit/09f5db3dd1413c6de20825c6b6c3e1cb682c92de) |
 
 ## Privacy
 
