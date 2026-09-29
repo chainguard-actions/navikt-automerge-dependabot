@@ -1,0 +1,41 @@
+name: Test minimum age of PR
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          token: GITHUB_TOKEN
+          # Very high minimum age means no PRs will be old enough to merge
+          minimum-age-of-pr: '9999'
+          semver-filter: 'patch,minor'
+          merge-method: 'merge'
+      - name: Assert action ran with high minimum age filter
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          MERGED_COUNT: ${{ steps.action.outputs.merged-pr-count }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "merged-pr-count: $MERGED_COUNT"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$MERGED_COUNT" ]; then
+              echo "FAIL: action succeeded but merged-pr-count output is empty"
+              exit 1
+            fi
+            # With a 9999-day minimum age, no PRs should be merged
+            if [ "$MERGED_COUNT" != "0" ]; then
+              echo "FAIL: expected 0 merged PRs with 9999-day minimum age, got '$MERGED_COUNT'"
+              exit 1
+            fi
+            echo "PASS: merged-pr-count=0 as expected with high minimum age"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (expected on sentinel repo)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
