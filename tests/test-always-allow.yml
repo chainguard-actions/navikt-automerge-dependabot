@@ -1,0 +1,30 @@
+name: Test always-allow input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          retry-delay-ms: '0'
+          always-allow: '*,name:eslint'
+      - name: Assert action succeeded with zero merges
+        env:
+          ACTUAL: ${{ steps.action.outputs.merged-pr-count }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "actual: $ACTUAL"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "0" ]; then
+            echo "FAIL: expected merged-pr-count '0'"
+            exit 1
+          fi
+          echo "PASS"
